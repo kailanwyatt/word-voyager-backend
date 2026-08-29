@@ -205,20 +205,19 @@ async function runJob(
           ? String(error.cause)
           : undefined,
     });
-    const retryable = code === 'provider_unavailable' || code === 'job_failed';
+    const retryable =
+      code === 'provider_unavailable' ||
+      code === 'job_failed' ||
+      code === 'validation_failed';
     const attempts = job.attempt_count;
     if (retryable && attempts < 3) {
       await fail(client, job, 'retryable_failure', code, {
         detail: message.slice(0, 180),
       });
     } else {
-      await fail(
-        client,
-        job,
-        'terminal_failure',
-        code === 'validation_failed' ? 'validation_failed' : code,
-        { detail: message.slice(0, 180) },
-      );
+      await fail(client, job, 'terminal_failure', code, {
+        detail: message.slice(0, 180),
+      });
     }
   }
 }

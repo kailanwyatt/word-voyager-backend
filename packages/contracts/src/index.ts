@@ -95,7 +95,7 @@ export const llmPackSchema = z
     title: z.string().min(1).max(80),
     description: z.string().min(1).max(400),
     language: z.enum(['en']).default('en'),
-    terms: z.array(llmTermSchema).min(8).max(40),
+    terms: z.array(llmTermSchema).min(4).max(40),
   })
   .strict();
 

@@ -42,6 +42,27 @@ export class OpenAiProvider implements LlmProvider {
   }
 
   async generatePack(input: GenerateTermsInput): Promise<LlmPack> {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.generatePackOnce(input, attempt > 0);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (lastError.message !== 'validation_failed') throw lastError;
+        // eslint-disable-next-line no-console
+        console.error(
+          '[study-worker] regenerating pack after validation_failed',
+          attempt + 1,
+        );
+      }
+    }
+    throw lastError ?? new Error('validation_failed');
+  }
+
+  private async generatePackOnce(
+    input: GenerateTermsInput,
+    stricter: boolean,
+  ): Promise<LlmPack> {
     const evidence = [
       `<evidence kind="${input.kind}">`,
       `<topic>${escapeEvidence(input.topic)}</topic>`,
@@ -57,10 +78,14 @@ export class OpenAiProvider implements LlmProvider {
       .filter(Boolean)
       .join('\n');
 
+    const strictHint = stricter
+      ? '\nPrevious output was invalid. Every answer MUST be exactly 3-8 A-Z letters with no spaces (e.g. NEVIS, CULTURE, HISTORY). Include at least 12 terms.'
+      : '';
+
     const completion = await this.client.chat.completions.create({
       model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
       response_format: { type: 'json_object' },
-      temperature: 0.4,
+      temperature: stricter ? 0.2 : 0.4,
       max_tokens: 4000,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -70,7 +95,7 @@ export class OpenAiProvider implements LlmProvider {
 Return JSON with this exact shape:
 {"title":"string","description":"string","language":"en","terms":[{"term":"display label","answer":"ABCDE","definition":"clue without the answer word","category":"topic","difficulty":1}]}
 Rules for each term: answer is 3-8 A-Z letters only (no spaces); definition 8-240 chars and must not include the answer; difficulty 1-5.
-${evidence}`,
+${evidence}${strictHint}`,
         },
       ],
     });
@@ -87,7 +112,7 @@ ${evidence}`,
       console.error('[study-worker] LLM returned non-JSON', raw.slice(0, 400));
       throw new Error('validation_failed');
     }
-    const pack = llmPackSchema.safeParse(parsed);
+    const pack = llmPackSchema.safeParse(normalizeLlmPayload(parsed));
     if (!pack.success) {
       const detail = pack.error.issues
         .slice(0, 8)
@@ -99,6 +124,56 @@ ${evidence}`,
     }
     return pack.data;
   }
+}
+
+/** Soft-clean common LLM mistakes before schema validation. */
+function normalizeLlmPayload(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return raw;
+  const root = raw as Record<string, unknown>;
+  const termsIn = Array.isArray(root.terms) ? root.terms : [];
+  const terms = termsIn
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const term = item as Record<string, unknown>;
+      const answer = String(term.answer ?? '')
+        .replace(/[^a-zA-Z]/g, '')
+        .toUpperCase()
+        .slice(0, 8);
+      const difficultyRaw = Number(term.difficulty);
+      const difficulty =
+        Number.isFinite(difficultyRaw) && difficultyRaw >= 1 && difficultyRaw <= 5
+          ? Math.round(difficultyRaw)
+          : 2;
+      return {
+        term: String(term.term ?? answer).slice(0, 40),
+        answer,
+        definition: String(term.definition ?? '').slice(0, 240),
+        explanation:
+          term.explanation == null
+            ? undefined
+            : String(term.explanation).slice(0, 400),
+        category: String(term.category ?? 'General').slice(0, 40) || 'General',
+        difficulty,
+      };
+    })
+    .filter((term): term is NonNullable<typeof term> => {
+      if (!term) return false;
+      return (
+        term.answer.length >= 3 &&
+        term.answer.length <= 8 &&
+        term.definition.length >= 8
+      );
+    });
+
+  return {
+    title: String(root.title ?? 'Study Pack').slice(0, 80),
+    description: String(root.description ?? 'Generated study terms.').slice(
+      0,
+      400,
+    ),
+    language: 'en',
+    terms,
+  };
 }
 
 function escapeEvidence(text: string): string {
