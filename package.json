@@ -6,7 +6,12 @@
     "packages/contracts",
     "worker"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.2",
   "scripts": {
+    "start": "npm run start -w @word-voyage/worker",
     "worker": "npm run start -w @word-voyage/worker",
     "test": "npm run test -w @word-voyage/contracts && npm run test -w @word-voyage/worker",
     "typecheck": "npm run typecheck -w @word-voyage/contracts && npm run typecheck -w @word-voyage/worker",

@@ -1,0 +1,10 @@
+# Railway / Railpack — Study AI worker (polls Supabase, calls OpenAI)
+# Deploy the word-voyage-backend repo root (not word-adventure).
+
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
