@@ -74,7 +74,16 @@ async function runJob(
       .eq('id', job.input_id)
       .single();
     if (inputError || !input) {
-      await fail(client, job, 'terminal_failure', 'validation_failed');
+      // eslint-disable-next-line no-console
+      console.error(
+        '[study-worker] missing study_inputs',
+        job.id,
+        job.input_id,
+        inputError?.message,
+      );
+      await fail(client, job, 'terminal_failure', 'validation_failed', {
+        detail: 'Could not load study input for this job',
+      });
       return;
     }
 
@@ -178,22 +187,37 @@ async function runJob(
       })
       .eq('id', job.input_id);
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     const code =
-      error instanceof Error && error.message === 'provider_unavailable'
+      message === 'provider_unavailable'
         ? 'provider_unavailable'
-        : error instanceof Error && error.message === 'validation_failed'
+        : message === 'validation_failed'
           ? 'validation_failed'
           : 'job_failed';
+    // eslint-disable-next-line no-console
+    console.error('[study-worker] job error', {
+      jobId: job.id,
+      attempt: job.attempt_count,
+      code,
+      message,
+      cause:
+        error instanceof Error && error.cause
+          ? String(error.cause)
+          : undefined,
+    });
     const retryable = code === 'provider_unavailable' || code === 'job_failed';
     const attempts = job.attempt_count;
     if (retryable && attempts < 3) {
-      await fail(client, job, 'retryable_failure', code);
+      await fail(client, job, 'retryable_failure', code, {
+        detail: message.slice(0, 180),
+      });
     } else {
       await fail(
         client,
         job,
         'terminal_failure',
         code === 'validation_failed' ? 'validation_failed' : code,
+        { detail: message.slice(0, 180) },
       );
     }
   }
@@ -378,6 +402,7 @@ async function fail(
   job: JobRow,
   status: 'retryable_failure' | 'terminal_failure',
   code: string,
+  opts?: { detail?: string },
 ): Promise<void> {
   const nextAttempt =
     status === 'retryable_failure'
@@ -394,6 +419,12 @@ async function fail(
       lease_expires_at: null,
     })
     .eq('id', job.id);
+  await client.from('generation_job_events').insert({
+    job_id: job.id,
+    sequence: job.attempt_count + 100,
+    state: status,
+    safe_detail: (opts?.detail ?? code).slice(0, 200),
+  });
   if (status === 'terminal_failure' && job.pack_id) {
     await client
       .from('study_packs')

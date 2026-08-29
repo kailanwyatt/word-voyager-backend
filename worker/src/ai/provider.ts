@@ -66,7 +66,11 @@ export class OpenAiProvider implements LlmProvider {
         { role: 'system', content: SYSTEM_PROMPT },
         {
           role: 'user',
-          content: `Create 12-24 crossword-suitable study terms from this evidence.\n${evidence}`,
+          content: `Create 12-24 crossword-suitable study terms from this evidence.
+Return JSON with this exact shape:
+{"title":"string","description":"string","language":"en","terms":[{"term":"display label","answer":"ABCDE","definition":"clue without the answer word","category":"topic","difficulty":1}]}
+Rules for each term: answer is 3-8 A-Z letters only (no spaces); definition 8-240 chars and must not include the answer; difficulty 1-5.
+${evidence}`,
         },
       ],
     });
@@ -79,10 +83,18 @@ export class OpenAiProvider implements LlmProvider {
     try {
       parsed = JSON.parse(raw);
     } catch {
+      // eslint-disable-next-line no-console
+      console.error('[study-worker] LLM returned non-JSON', raw.slice(0, 400));
       throw new Error('validation_failed');
     }
     const pack = llmPackSchema.safeParse(parsed);
     if (!pack.success) {
+      const detail = pack.error.issues
+        .slice(0, 8)
+        .map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`)
+        .join('; ');
+      // eslint-disable-next-line no-console
+      console.error('[study-worker] LLM JSON failed schema', detail);
       throw new Error('validation_failed');
     }
     return pack.data;
