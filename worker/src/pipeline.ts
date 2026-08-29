@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createHash } from 'node:crypto';
+import ws from 'ws';
 import {
   PUZZLE_ENGINE_VERSION,
   RECIPE_VERSION,
@@ -24,6 +25,8 @@ type JobRow = {
 export function adminClient(): SupabaseClient {
   return createClient(supabaseUrl(), supabaseServiceRoleKey(), {
     auth: { persistSession: false, autoRefreshToken: false },
+    // Node <22 has no global WebSocket; supabase-js Realtime requires one at construct time.
+    realtime: { transport: ws as unknown as typeof WebSocket },
   });
 }
 
