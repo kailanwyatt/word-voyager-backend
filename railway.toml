@@ -5,6 +5,10 @@
 builder = "RAILPACK"
 
 [deploy]
-startCommand = "npm start"
+# Start Node directly (not `npm start`) so SIGTERM reaches the worker and
+# exits 0 instead of npm reporting "signal SIGTERM" as a crash.
+startCommand = "node --import tsx worker/src/index.ts"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

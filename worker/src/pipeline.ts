@@ -30,9 +30,15 @@ export function adminClient(): SupabaseClient {
   });
 }
 
+export type ProcessJobOptions = {
+  /** Job-level attempts before terminal_failure for retryable codes. Default 5. */
+  maxAttempts?: number;
+};
+
 export async function processNextJob(
   client: SupabaseClient,
   provider?: LlmProvider,
+  options?: ProcessJobOptions,
 ): Promise<boolean> {
   const { data: job, error } = await client
     .rpc('claim_generation_job', { p_worker_id: WORKER_ID })
@@ -47,7 +53,7 @@ export async function processNextJob(
     throw new Error(error.message || 'claim_generation_job failed');
   }
   if (!job || !(job as JobRow).id) return false;
-  await runJob(client, job as JobRow, provider);
+  await runJob(client, job as JobRow, provider, options?.maxAttempts ?? 5);
   return true;
 }
 
@@ -66,6 +72,7 @@ async function runJob(
   client: SupabaseClient,
   job: JobRow,
   provider?: LlmProvider,
+  maxAttempts = 5,
 ): Promise<void> {
   try {
     const { data: input, error: inputError } = await client
@@ -136,21 +143,32 @@ async function runJob(
     });
     const terms = validateLlmTerms(generated.terms);
     if (terms.length < 4) {
-      await fail(client, job, 'terminal_failure', 'unplayable_terms');
-      return;
+      // eslint-disable-next-line no-console
+      console.error('[study-worker] too few playable terms', {
+        jobId: job.id,
+        accepted: terms.length,
+        raw: generated.terms.length,
+      });
+      throw new Error('unplayable_terms');
     }
 
     await setStatus(client, job.id, 'building_preview');
     const packId = job.pack_id;
     if (!packId) {
-      await fail(client, job, 'terminal_failure', 'job_failed');
+      await fail(client, job, 'terminal_failure', 'job_failed', {
+        detail: 'Job missing pack_id',
+      });
       return;
     }
 
     const lessons = groupTermsIntoLessons(packId, terms, hashSeed(job.id));
     if (lessons.length < 1) {
-      await fail(client, job, 'terminal_failure', 'unplayable_terms');
-      return;
+      // eslint-disable-next-line no-console
+      console.error('[study-worker] could not build any lessons', {
+        jobId: job.id,
+        terms: terms.length,
+      });
+      throw new Error('unplayable_terms');
     }
 
     await persistPack(client, {
@@ -188,12 +206,7 @@ async function runJob(
       .eq('id', job.input_id);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const code =
-      message === 'provider_unavailable'
-        ? 'provider_unavailable'
-        : message === 'validation_failed'
-          ? 'validation_failed'
-          : 'job_failed';
+    const code = classifyJobError(message);
     // eslint-disable-next-line no-console
     console.error('[study-worker] job error', {
       jobId: job.id,
@@ -208,9 +221,10 @@ async function runJob(
     const retryable =
       code === 'provider_unavailable' ||
       code === 'job_failed' ||
-      code === 'validation_failed';
+      code === 'validation_failed' ||
+      code === 'unplayable_terms';
     const attempts = job.attempt_count;
-    if (retryable && attempts < 3) {
+    if (retryable && attempts < maxAttempts) {
       await fail(client, job, 'retryable_failure', code, {
         detail: message.slice(0, 180),
       });
@@ -220,6 +234,17 @@ async function runJob(
       });
     }
   }
+}
+
+function classifyJobError(message: string): string {
+  if (message === 'provider_unavailable') return 'provider_unavailable';
+  if (message === 'validation_failed') return 'validation_failed';
+  if (message === 'unplayable_terms') return 'unplayable_terms';
+  // OpenAI / network blips often surface as long messages — treat as retryable provider issues.
+  if (/rate limit|429|timeout|ECONNRESET|fetch failed|503|502|overloaded/i.test(message)) {
+    return 'provider_unavailable';
+  }
+  return 'job_failed';
 }
 
 async function persistPack(

@@ -4,6 +4,6 @@
     "node": "22"
   },
   "deploy": {
-    "startCommand": "npm start"
+    "startCommand": "node --import tsx worker/src/index.ts"
   }
 }

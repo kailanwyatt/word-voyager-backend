@@ -33,12 +33,16 @@ export class OpenAiProvider implements LlmProvider {
   }
 
   async moderate(text: string): Promise<{ allowed: boolean }> {
-    const result = await this.client.moderations.create({
-      model: 'omni-moderation-latest',
-      input: text.slice(0, 8000),
-    });
-    const flagged = result.results.some((row) => row.flagged);
-    return { allowed: !flagged };
+    try {
+      const result = await this.client.moderations.create({
+        model: 'omni-moderation-latest',
+        input: text.slice(0, 8000),
+      });
+      const flagged = result.results.some((row) => row.flagged);
+      return { allowed: !flagged };
+    } catch (error) {
+      throw mapProviderError(error);
+    }
   }
 
   async generatePack(input: GenerateTermsInput): Promise<LlmPack> {
@@ -82,23 +86,28 @@ export class OpenAiProvider implements LlmProvider {
       ? '\nPrevious output was invalid. Every answer MUST be exactly 3-8 A-Z letters with no spaces (e.g. NEVIS, CULTURE, HISTORY). Include at least 12 terms.'
       : '';
 
-    const completion = await this.client.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      temperature: stricter ? 0.2 : 0.4,
-      max_tokens: 4000,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `Create 12-24 crossword-suitable study terms from this evidence.
+    let completion;
+    try {
+      completion = await this.client.chat.completions.create({
+        model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+        response_format: { type: 'json_object' },
+        temperature: stricter ? 0.2 : 0.4,
+        max_tokens: 4000,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: `Create 12-24 crossword-suitable study terms from this evidence.
 Return JSON with this exact shape:
 {"title":"string","description":"string","language":"en","terms":[{"term":"display label","answer":"ABCDE","definition":"clue without the answer word","category":"topic","difficulty":1}]}
 Rules for each term: answer is 3-8 A-Z letters only (no spaces); definition 8-240 chars and must not include the answer; difficulty 1-5.
 ${evidence}${strictHint}`,
-        },
-      ],
-    });
+          },
+        ],
+      });
+    } catch (error) {
+      throw mapProviderError(error);
+    }
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) {
@@ -124,6 +133,25 @@ ${evidence}${strictHint}`,
     }
     return pack.data;
   }
+}
+
+function mapProviderError(error: unknown): Error {
+  if (error instanceof Error) {
+    const known = error.message;
+    if (
+      known === 'validation_failed' ||
+      known === 'provider_unavailable' ||
+      known === 'unplayable_terms'
+    ) {
+      return error;
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.error(
+    '[study-worker] OpenAI request failed',
+    error instanceof Error ? error.message : String(error),
+  );
+  return new Error('provider_unavailable', { cause: error });
 }
 
 /** Soft-clean common LLM mistakes before schema validation. */
