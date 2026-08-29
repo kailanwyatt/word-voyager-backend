@@ -24,60 +24,85 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  const url = new URL(req.url);
+  const path = routePath(url);
   try {
-    const url = new URL(req.url);
-    const path = routePath(url);
     const userId = await requireUserId(req);
     await ensureProfile(userId);
-
-    if (req.method === 'GET' && path === '/bootstrap') {
-      return await handleBootstrap(userId);
-    }
-    if (req.method === 'POST' && path === '/inputs') {
-      return await handleCreateInput(userId, await req.json());
-    }
-    if (req.method === 'POST' && path === '/generation-jobs') {
-      return await handleCreateJob(userId, await req.json());
-    }
-
-    const jobMatch = path.match(/^\/jobs\/([^/]+)$/);
-    if (req.method === 'GET' && jobMatch) {
-      return await handleGetJob(userId, jobMatch[1]!);
-    }
-    const jobAction = path.match(/^\/jobs\/([^/]+)\/(retry|cancel)$/);
-    if (req.method === 'POST' && jobAction) {
-      return await handleJobAction(userId, jobAction[1]!, jobAction[2]!);
-    }
-
-    if (req.method === 'GET' && path === '/packs') {
-      return await handleListPacks(userId);
-    }
-    const packMatch = path.match(/^\/packs\/([^/]+)$/);
-    if (req.method === 'GET' && packMatch) {
-      return await handleGetPack(userId, packMatch[1]!, false);
-    }
-    const manifestMatch = path.match(
-      /^\/packs\/([^/]+)\/versions\/([^/]+)\/manifest$/,
+    const response = await routeRequest(req, path, userId);
+    console.log(
+      JSON.stringify({
+        method: req.method,
+        path,
+        status: response.status,
+        userId: userId.slice(0, 8),
+      }),
     );
-    if (req.method === 'GET' && manifestMatch) {
-      return await handleGetPack(userId, manifestMatch[1]!, true);
-    }
-    const unlockMatch = path.match(/^\/packs\/([^/]+)\/unlock-with-credit$/);
-    if (req.method === 'POST' && unlockMatch) {
-      return await handleUnlock(req, userId, unlockMatch[1]!);
-    }
-    if (req.method === 'POST' && path === '/credits/dev-grant') {
-      return await handleDevGrant(userId);
-    }
-
-    return errorResponse(404, 'not_found', 'Unknown route');
+    return response;
   } catch (error) {
     if (error instanceof AuthError) {
+      console.log(
+        JSON.stringify({
+          method: req.method,
+          path,
+          status: 401,
+          error: 'auth_required',
+        }),
+      );
       return errorResponse(401, 'auth_required', 'Sign in to continue');
     }
+    console.error('study-api unhandled', error);
     return errorResponse(500, 'job_failed', 'Request failed');
   }
 });
+
+async function routeRequest(
+  req: Request,
+  path: string,
+  userId: string,
+): Promise<Response> {
+  if (req.method === 'GET' && path === '/bootstrap') {
+    return await handleBootstrap(userId);
+  }
+  if (req.method === 'POST' && path === '/inputs') {
+    return await handleCreateInput(userId, await req.json());
+  }
+  if (req.method === 'POST' && path === '/generation-jobs') {
+    return await handleCreateJob(userId, await req.json());
+  }
+
+  const jobMatch = path.match(/^\/jobs\/([^/]+)$/);
+  if (req.method === 'GET' && jobMatch) {
+    return await handleGetJob(userId, jobMatch[1]!);
+  }
+  const jobAction = path.match(/^\/jobs\/([^/]+)\/(retry|cancel)$/);
+  if (req.method === 'POST' && jobAction) {
+    return await handleJobAction(userId, jobAction[1]!, jobAction[2]!);
+  }
+
+  if (req.method === 'GET' && path === '/packs') {
+    return await handleListPacks(userId);
+  }
+  const packMatch = path.match(/^\/packs\/([^/]+)$/);
+  if (req.method === 'GET' && packMatch) {
+    return await handleGetPack(userId, packMatch[1]!, false);
+  }
+  const manifestMatch = path.match(
+    /^\/packs\/([^/]+)\/versions\/([^/]+)\/manifest$/,
+  );
+  if (req.method === 'GET' && manifestMatch) {
+    return await handleGetPack(userId, manifestMatch[1]!, true);
+  }
+  const unlockMatch = path.match(/^\/packs\/([^/]+)\/unlock-with-credit$/);
+  if (req.method === 'POST' && unlockMatch) {
+    return await handleUnlock(req, userId, unlockMatch[1]!);
+  }
+  if (req.method === 'POST' && path === '/credits/dev-grant') {
+    return await handleDevGrant(userId);
+  }
+
+  return errorResponse(404, 'not_found', 'Unknown route');
+}
 
 function routePath(url: URL): string {
   const raw = url.pathname;
