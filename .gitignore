@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+worker/.env
+*.log
+.DS_Store
+coverage/
+*.tsbuildinfo
+vitest.config.ts.timestamp-*.mjs
+
+# Local Supabase CLI state (never commit start-secrets)
+supabase/.temp/
+supabase/.branches/
