@@ -9,7 +9,10 @@ import {
 } from '@word-voyage/contracts';
 import { createProvider, type LlmProvider } from './ai/provider';
 import { supabaseServiceRoleKey, supabaseUrl } from './loadEnv';
-import { groupTermsIntoLessons, validateLlmTerms } from './puzzle/buildPack';
+import {
+  groupTermsIntoLessons,
+  validateLlmTermsDetailed,
+} from './puzzle/buildPack';
 
 const WORKER_ID = `worker-${process.pid}`;
 
@@ -141,13 +144,28 @@ async function runJob(
       level: input.level,
       learningGoal: input.learning_goal,
     });
-    const terms = validateLlmTerms(generated.terms);
+    const { accepted: terms, rejected } = validateLlmTermsDetailed(
+      generated.terms,
+    );
+    if (rejected.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn('[study-worker] rejected terms', {
+        jobId: job.id,
+        rejected: rejected.slice(0, 24).map((row) => ({
+          term: row.term.slice(0, 40),
+          answer: row.answer.slice(0, 12),
+          reason: row.reason,
+        })),
+      });
+    }
     if (terms.length < 4) {
       // eslint-disable-next-line no-console
       console.error('[study-worker] too few playable terms', {
         jobId: job.id,
         accepted: terms.length,
+        rejected: rejected.length,
         raw: generated.terms.length,
+        acceptedAnswers: terms.slice(0, 20).map((t) => t.answer),
       });
       throw new Error('unplayable_terms');
     }
@@ -167,9 +185,21 @@ async function runJob(
       console.error('[study-worker] could not build any lessons', {
         jobId: job.id,
         terms: terms.length,
+        answers: terms.map((t) => t.answer),
       });
       throw new Error('unplayable_terms');
     }
+    // eslint-disable-next-line no-console
+    console.log('[study-worker] built lessons', {
+      jobId: job.id,
+      lessons: lessons.length,
+      unusedTerms: Math.max(
+        0,
+        terms.length -
+          new Set(lessons.flatMap((l) => l.terms.map((t) => t.answer))).size,
+      ),
+      puzzleSizes: lessons.map((l) => l.puzzle.answers.length),
+    });
 
     await persistPack(client, {
       job,
@@ -257,7 +287,7 @@ async function persistPack(
     };
     title: string;
     description: string;
-    terms: ReturnType<typeof validateLlmTerms>;
+    terms: ReturnType<typeof validateLlmTermsDetailed>['accepted'];
     lessons: ReturnType<typeof groupTermsIntoLessons>;
   },
 ): Promise<void> {
@@ -395,8 +425,8 @@ async function persistPack(
 }
 
 function uniqueByAnswer(
-  terms: ReturnType<typeof validateLlmTerms>,
-): ReturnType<typeof validateLlmTerms> {
+  terms: ReturnType<typeof validateLlmTermsDetailed>['accepted'],
+): ReturnType<typeof validateLlmTermsDetailed>['accepted'] {
   const seen = new Set<string>();
   const out = [];
   for (const term of terms) {

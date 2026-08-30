@@ -785,31 +785,26 @@ export function generateConnectedCrossword(
       }
 
       if (!validation.valid) continue;
-      if (validation.quality !== 'poor') {
-        // Prefer good/excellent but accept first solid connected layout quickly.
-        if (
-          validation.quality === 'good' ||
-          validation.quality === 'excellent' ||
-          !best
-        ) {
-          if (
-            !best ||
-            validation.score > best.validation.score ||
-            validation.quality === 'excellent'
-          ) {
-            best = { placements: normalized, validation };
-          }
-        }
-        if (
-          validation.quality === 'good' ||
-          validation.quality === 'excellent'
-        ) {
-          return {
-            placements: normalized,
-            validation,
-            attempts,
-          };
-        }
+
+      // Prefer higher quality, but still keep structurally valid layouts.
+      // Place-name sets often produce sparse bounding boxes that score "poor"
+      // even when they are fully connected with enough crossings.
+      if (
+        !best ||
+        validation.score > best.validation.score ||
+        qualityRank(validation.quality) > qualityRank(best.validation.quality)
+      ) {
+        best = { placements: normalized, validation };
+      }
+      if (
+        validation.quality === 'good' ||
+        validation.quality === 'excellent'
+      ) {
+        return {
+          placements: normalized,
+          validation,
+          attempts,
+        };
       }
     }
   }
@@ -817,9 +812,7 @@ export function generateConnectedCrossword(
   if (
     best &&
     best.validation.valid &&
-    (best.validation.quality === 'good' ||
-      best.validation.quality === 'excellent' ||
-      // Accept best valid connected layout if campaign bar is tight on this letter set
+    (best.placements.length === 1 ||
       (best.validation.componentCount === 1 &&
         best.validation.intersectionCount >=
           minIntersectionsForCount(best.placements.length)))
@@ -832,6 +825,19 @@ export function generateConnectedCrossword(
   }
 
   return null;
+}
+
+function qualityRank(quality: PuzzleQuality): number {
+  switch (quality) {
+    case 'excellent':
+      return 4;
+    case 'good':
+      return 3;
+    case 'acceptable':
+      return 2;
+    default:
+      return 1;
+  }
 }
 
 export function placementsToAnswers(placements: PlacedWord[]): PuzzleAnswer[] {
