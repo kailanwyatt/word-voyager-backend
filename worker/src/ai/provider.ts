@@ -4,12 +4,19 @@ import {
   llmBandWaveSchema,
   llmPackSchema,
   STUDY_BAND_TERM_MIN,
+  STUDY_BAND_WAVE_MIN,
   STUDY_TERMS_PER_BAND_TARGET,
   type LlmPack,
 } from '@word-voyage/contracts';
 import {
+  failValidation,
+  normalizeLlmPayload,
+  parseLlmJson,
+} from './normalizeLlm';
+import {
   appendUniqueTerms,
   assignBandDifficulty,
+  countByBand,
   hasPaidBandCoverage,
   mergeBandPacks,
   shouldExpandBand,
@@ -116,11 +123,17 @@ export class OpenAiProvider implements LlmProvider {
     }
     const merged = mergeBandPacks(collected);
     if (!hasPaidBandCoverage(merged.terms)) {
-      throw new Error('validation_failed');
+      failValidation('band_coverage', {
+        total: merged.terms.length,
+        ...countByBand(merged.terms),
+      });
     }
     const parsed = llmPackSchema.safeParse(merged);
     if (!parsed.success) {
-      throw new Error('validation_failed');
+      failValidation('merged_schema', {
+        total: merged.terms.length,
+        issues: parsed.error.issues.slice(0, 4).map((issue) => issue.message),
+      });
     }
     return parsed.data;
   }
@@ -167,6 +180,7 @@ export class OpenAiProvider implements LlmProvider {
             wave + 1,
             'after validation_failed',
             attempt + 1,
+            lastError.cause ?? lastError.message,
           );
         }
       }
@@ -194,7 +208,11 @@ export class OpenAiProvider implements LlmProvider {
       terms: assignBandDifficulty(terms, band.id),
     });
     if (!complete.success) {
-      throw new Error('validation_failed');
+      failValidation('band_schema', {
+        band: band.id,
+        count: terms.length,
+        issues: complete.error.issues.slice(0, 4).map((issue) => issue.message),
+      });
     }
     // eslint-disable-next-line no-console
     console.info('[study-worker] band complete', band.id, complete.data.terms.length);
@@ -277,15 +295,15 @@ ${evidence}${exclude}${strictHint}`,
     if (!raw) {
       throw new Error('provider_unavailable');
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      // eslint-disable-next-line no-console
-      console.error('[study-worker] LLM returned non-JSON', raw.slice(0, 400));
-      throw new Error('validation_failed');
+    const parsed = parseLlmJson(raw);
+    const cleaned = normalizeLlmPayload(parsed);
+    if (cleaned.terms.length < STUDY_BAND_WAVE_MIN) {
+      failValidation('wave_too_small', {
+        band: band.id,
+        count: cleaned.terms.length,
+      });
     }
-    const pack = llmBandWaveSchema.safeParse(normalizeLlmPayload(parsed));
+    const pack = llmBandWaveSchema.safeParse(cleaned);
     if (!pack.success) {
       const detail = pack.error.issues
         .slice(0, 8)
@@ -293,7 +311,7 @@ ${evidence}${exclude}${strictHint}`,
         .join('; ');
       // eslint-disable-next-line no-console
       console.error('[study-worker] LLM JSON failed schema', detail);
-      throw new Error('validation_failed');
+      failValidation('wave_schema', { band: band.id, detail });
     }
     return pack.data;
   }
@@ -329,21 +347,49 @@ ${evidence}${exclude}${strictHint}`,
     const raw = completion.choices[0]?.message?.content;
     if (!raw) throw new Error('provider_unavailable');
     try {
-      const review = JSON.parse(raw) as { approvedAnswers?: unknown };
-      if (!Array.isArray(review.approvedAnswers)) throw new Error('invalid');
+      const review = parseLlmJson(raw) as { approvedAnswers?: unknown };
+      if (!Array.isArray(review.approvedAnswers)) {
+        // eslint-disable-next-line no-console
+        console.warn('[study-worker] review missing approvedAnswers; keeping batch', band.id);
+        return pack;
+      }
       const approved = new Set(
         review.approvedAnswers
           .filter((value): value is string => typeof value === 'string')
           .map((value) => value.toUpperCase()),
       );
       const terms = pack.terms.filter((term) => approved.has(term.answer));
-      if (options.required && terms.length < options.minApproved) {
-        throw new Error('validation_failed');
+      if (terms.length >= options.minApproved) {
+        return { ...pack, terms };
+      }
+      if (pack.terms.length >= options.minApproved) {
+        // eslint-disable-next-line no-console
+        console.warn('[study-worker] review too strict; keeping generated batch', {
+          band: band.id,
+          approved: terms.length,
+          generated: pack.terms.length,
+        });
+        return pack;
+      }
+      if (options.required) {
+        failValidation('review_too_few', {
+          band: band.id,
+          approved: terms.length,
+          generated: pack.terms.length,
+        });
       }
       return { ...pack, terms };
     } catch (error) {
-      if (error instanceof Error && error.message === 'validation_failed') throw error;
-      throw new Error('validation_failed');
+      if (
+        error instanceof Error &&
+        error.message === 'validation_failed' &&
+        String(error.cause ?? '').includes('review_too_few')
+      ) {
+        throw error;
+      }
+      // eslint-disable-next-line no-console
+      console.warn('[study-worker] review parse failed; keeping batch', band.id);
+      return pack;
     }
   }
 }
@@ -365,54 +411,6 @@ function mapProviderError(error: unknown): Error {
     error instanceof Error ? error.message : String(error),
   );
   return new Error('provider_unavailable', { cause: error });
-}
-
-/** Soft-clean common LLM mistakes before schema validation. */
-function normalizeLlmPayload(raw: unknown): unknown {
-  if (!raw || typeof raw !== 'object') return raw;
-  const root = raw as Record<string, unknown>;
-  const termsIn = Array.isArray(root.terms) ? root.terms : [];
-  const terms = termsIn
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const term = item as Record<string, unknown>;
-      // Do not silently truncate long answers (CARIBBEAN → CARIBBEA). Drop instead.
-      const answer = String(term.answer ?? '').trim().toUpperCase();
-      const difficultyRaw = Number(term.difficulty);
-      const difficulty =
-        Number.isFinite(difficultyRaw) && difficultyRaw >= 1 && difficultyRaw <= 5
-          ? Math.round(difficultyRaw)
-          : 2;
-      return {
-        term: String(term.term ?? answer).slice(0, 40),
-        answer,
-        definition: String(term.definition ?? '').slice(0, 240),
-        explanation:
-          term.explanation == null
-            ? undefined
-            : String(term.explanation).slice(0, 400),
-        category: String(term.category ?? 'General').slice(0, 40) || 'General',
-        difficulty,
-      };
-    })
-    .filter((term): term is NonNullable<typeof term> => {
-      if (!term) return false;
-      return (
-        term.answer.length >= 3 &&
-        term.answer.length <= 12 &&
-        term.definition.length >= 8
-      );
-    });
-
-  return {
-    title: String(root.title ?? 'Study Pack').slice(0, 80),
-    description: String(root.description ?? 'Generated study terms.').slice(
-      0,
-      400,
-    ),
-    language: 'en',
-    terms,
-  };
 }
 
 function escapeEvidence(text: string, max = 10_000): string {

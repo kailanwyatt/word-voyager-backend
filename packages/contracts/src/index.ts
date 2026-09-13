@@ -127,9 +127,9 @@ export const llmTermSchema = z
   .strict();
 
 /** One Easy, Medium, or Hard word set before the worker merges them. */
-export const STUDY_BAND_WAVE_MIN = 8;
+export const STUDY_BAND_WAVE_MIN = 4;
 export const STUDY_BAND_WAVE_MAX = 24;
-export const STUDY_BAND_TERM_MIN = 16;
+export const STUDY_BAND_TERM_MIN = 12;
 export const STUDY_BAND_TERM_MAX = 60;
 export const STUDY_TERMS_PER_BAND_TARGET = 60;
 export const STUDY_BAND_EXPAND_MIN = 8;

@@ -245,8 +245,10 @@ async function runJob(
       code,
       message,
       cause:
-        error instanceof Error && error.cause
-          ? String(error.cause)
+        error instanceof Error && error.cause != null
+          ? typeof error.cause === 'string'
+            ? error.cause
+            : JSON.stringify(error.cause).slice(0, 400)
           : undefined,
     });
     const retryable =
