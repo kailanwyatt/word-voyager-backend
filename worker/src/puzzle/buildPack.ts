@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { LlmTerm } from '@word-voyage/contracts';
+import { resolveStudyAnswer } from '../ai/termQuality';
 import {
   generateConnectedCrossword,
   placementsToAnswers,
@@ -39,6 +40,7 @@ export type TermRejection = {
     | 'leaks_answer'
     | 'circular'
     | 'fabricated_url'
+    | 'truncated'
     | 'empty';
 };
 
@@ -83,64 +85,37 @@ export function isPlayableAnswer(answer: string): boolean {
 
 /**
  * Accept only a complete display term or a complete word within it.
- * Never silently glue or truncate names (St. Kitts → STKITTS,
- * Basseterre → BASSETER).
+ * Never silently truncate or particle-glue (chlorophyll → CHLOROPHY,
+ * T cell → TCELL).
  */
-export function derivePlayableAnswers(term: string, answer: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const push = (raw: string) => {
-    const lettersOnly = raw.replace(/[^a-zA-Z]/g, '');
-    if (lettersOnly.length > MAX_ANSWER_LEN) return;
-    const normalized = normalizeWord(raw);
-    if (!isPlayableAnswer(normalized) || seen.has(normalized)) return;
-    seen.add(normalized);
-    out.push(normalized);
-  };
-
-  const parts = term.split(/[\s/,.&+'’`-]+/).filter(Boolean);
-  const normalizedAnswer = normalizeWord(answer);
-
-  // The playable answer must be a real lexical form of the display term, never
-  // a synonym, generic substitute, glued phrase, or invented truncation.
-  const meaningfulParts = parts
-    .map(normalizeWord)
-    .filter((part) => part.length >= MIN_ANSWER_LEN);
-  const fullTerm = normalizeWord(term);
-  if (
-    (parts.length === 1 && normalizedAnswer === fullTerm) ||
-    meaningfulParts.includes(normalizedAnswer)
-  ) {
-    push(answer);
-  }
-
-  return out;
+export function derivePlayableAnswers(
+  term: string,
+  answer: string,
+  definition?: string,
+): string[] {
+  const resolved = resolveStudyAnswer(term, answer, definition);
+  if (!resolved || !isPlayableAnswer(resolved.answer)) return [];
+  return [resolved.answer];
 }
 
 /**
  * Keep complete 9–12 letter names (Basseterre, Brimstone) for study
  * mini-games when they cannot sit in a crossword.
  */
-export function miniGameOnlyAnswer(term: string, answer: string): string | null {
-  const parts = term
-    .split(/[\s/,.&+'’`-]+/)
-    .filter(Boolean)
-    .map(normalizeWord);
-  const full = normalizeWord(term);
-  const ans = normalizeWord(answer);
-  const allowed = new Set(
-    [full, ...parts].filter(
-      (word) =>
-        word.length >= MIN_ANSWER_LEN && word.length <= MAX_MINIGAME_WORD_LEN,
-    ),
-  );
-  const keep = (word: string): boolean =>
-    allowed.has(word) &&
-    word.length > MAX_ANSWER_LEN &&
-    word.length <= MAX_MINIGAME_WORD_LEN;
-  if (keep(ans)) return ans;
-  if (keep(full)) return full;
-  return parts.find(keep) ?? null;
+export function miniGameOnlyAnswer(
+  term: string,
+  answer: string,
+  definition?: string,
+): string | null {
+  const resolved = resolveStudyAnswer(term, answer, definition);
+  if (!resolved) return null;
+  if (
+    resolved.answer.length > MAX_ANSWER_LEN &&
+    resolved.answer.length <= MAX_MINIGAME_WORD_LEN
+  ) {
+    return resolved.answer;
+  }
+  return null;
 }
 
 export function definitionLeaksAnswer(
@@ -166,46 +141,55 @@ export function containsFabricatedUrl(text: string): boolean {
 
 export function validateLlmTermsDetailed(terms: LlmTerm[]): TermValidationResult {
   const seen = new Set<string>();
+  const seenEntities = new Set<string>();
   const accepted: ValidTerm[] = [];
   const rejected: TermRejection[] = [];
 
+  const reject = (
+    label: string,
+    answer: string,
+    reason: TermRejection['reason'],
+  ) => {
+    rejected.push({ term: label, answer, reason });
+  };
+
   for (const term of terms) {
     const display = term.term.trim();
-    const candidates = derivePlayableAnswers(display, term.answer);
+    const resolved = resolveStudyAnswer(display, term.answer, term.definition);
+    const label = resolved?.term ?? display;
+    const entity = resolved ? normalizeWord(resolved.term) : '';
+    const candidates = derivePlayableAnswers(
+      display,
+      term.answer,
+      term.definition,
+    );
     if (candidates.length === 0) {
-      const miniGame = miniGameOnlyAnswer(display, term.answer);
+      const miniGame = miniGameOnlyAnswer(display, term.answer, term.definition);
       if (miniGame) {
-        if (seen.has(miniGame)) {
-          rejected.push({ term: display, answer: miniGame, reason: 'duplicate' });
+        if (seen.has(miniGame) || (entity && seenEntities.has(entity))) {
+          reject(label, miniGame, 'duplicate');
           continue;
         }
         if (definitionLeaksAnswer(term.definition, miniGame)) {
-          rejected.push({
-            term: display,
-            answer: miniGame,
-            reason: 'leaks_answer',
-          });
+          reject(label, miniGame, 'leaks_answer');
           continue;
         }
-        if (isCircularDefinition(display || miniGame, term.definition)) {
-          rejected.push({ term: display, answer: miniGame, reason: 'circular' });
+        if (isCircularDefinition(label || miniGame, term.definition)) {
+          reject(label, miniGame, 'circular');
           continue;
         }
         if (
           containsFabricatedUrl(term.definition) ||
           containsFabricatedUrl(term.explanation ?? '')
         ) {
-          rejected.push({
-            term: display,
-            answer: miniGame,
-            reason: 'fabricated_url',
-          });
+          reject(label, miniGame, 'fabricated_url');
           continue;
         }
         seen.add(miniGame);
+        if (entity) seenEntities.add(entity);
         accepted.push({
           stableKey: miniGame.toLowerCase(),
-          term: display || miniGame,
+          term: label || miniGame,
           answer: miniGame,
           definition: term.definition.trim(),
           explanation: term.explanation?.trim(),
@@ -215,48 +199,45 @@ export function validateLlmTermsDetailed(terms: LlmTerm[]): TermValidationResult
         continue;
       }
       const normalized = normalizeWord(term.answer || display);
-      let reason: TermRejection['reason'] = 'empty';
+      let reason: TermRejection['reason'] = 'truncated';
       if (normalized.length > 0 && normalized.length < MIN_ANSWER_LEN) {
         reason = 'too_short';
-      } else if (normalized.length > MAX_ANSWER_LEN) {
+      } else if (normalized.length > MAX_MINIGAME_WORD_LEN) {
         reason = 'too_long';
+      } else if (!normalized) {
+        reason = 'empty';
       }
-      rejected.push({
-        term: display || term.answer,
-        answer: normalized || String(term.answer ?? ''),
-        reason,
-      });
+      reject(display || term.answer, normalized || String(term.answer ?? ''), reason);
       continue;
     }
 
     let acceptedOne = false;
     for (const answer of candidates) {
-      if (seen.has(answer)) {
-        if (!acceptedOne) {
-          rejected.push({ term: display, answer, reason: 'duplicate' });
-        }
+      if (seen.has(answer) || (entity && seenEntities.has(entity))) {
+        if (!acceptedOne) reject(label, answer, 'duplicate');
         continue;
       }
       if (definitionLeaksAnswer(term.definition, answer)) {
-        rejected.push({ term: display, answer, reason: 'leaks_answer' });
+        reject(label, answer, 'leaks_answer');
         continue;
       }
-      if (isCircularDefinition(display || answer, term.definition)) {
-        rejected.push({ term: display, answer, reason: 'circular' });
+      if (isCircularDefinition(label || answer, term.definition)) {
+        reject(label, answer, 'circular');
         continue;
       }
       if (
         containsFabricatedUrl(term.definition) ||
         containsFabricatedUrl(term.explanation ?? '')
       ) {
-        rejected.push({ term: display, answer, reason: 'fabricated_url' });
+        reject(label, answer, 'fabricated_url');
         continue;
       }
 
       seen.add(answer);
+      if (entity) seenEntities.add(entity);
       accepted.push({
         stableKey: answer.toLowerCase(),
-        term: display || answer,
+        term: label || answer,
         answer,
         definition: term.definition.trim(),
         explanation: term.explanation?.trim(),
@@ -264,8 +245,6 @@ export function validateLlmTermsDetailed(terms: LlmTerm[]): TermValidationResult
         difficulty: term.difficulty as ValidTerm['difficulty'],
       });
       acceptedOne = true;
-      // One playable answer per LLM term keeps packs focused; extras from
-      // the same multi-word label are only used when the primary was unusable.
       break;
     }
   }

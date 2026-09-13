@@ -89,6 +89,11 @@ describe('paid pack size', () => {
       'FORT',
       'REEF',
     ]);
+    const withoutDupLandmark = appendUniqueTerms(
+      [{ ...term('CELL', 1), term: 'T cell' }],
+      [{ ...term('BLOOD', 2), term: 'T cell' }],
+    );
+    expect(withoutDupLandmark.map((row) => row.answer)).toEqual(['CELL']);
     expect(shouldExpandBand(22, 20)).toBe(true);
     expect(shouldExpandBand(60, 20)).toBe(false);
     expect(shouldExpandBand(40, 5)).toBe(false);

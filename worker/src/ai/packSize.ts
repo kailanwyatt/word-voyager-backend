@@ -6,6 +6,7 @@ import {
   type LlmPack,
   type LlmTerm,
 } from '@word-voyage/contracts';
+import { letterKey } from './termQuality';
 
 export type DifficultyBand = 'easy' | 'medium' | 'hard';
 
@@ -51,11 +52,14 @@ export function appendUniqueTerms(
   cap = STUDY_TERMS_PER_BAND_TARGET,
 ): LlmTerm[] {
   const seen = new Set(existing.map((term) => term.answer.toUpperCase()));
+  const seenEntities = new Set(existing.map((term) => letterKey(term.term)));
   const terms = [...existing];
   for (const term of incoming) {
     const answer = term.answer.toUpperCase();
-    if (seen.has(answer)) continue;
+    const entity = letterKey(term.term);
+    if (seen.has(answer) || (entity && seenEntities.has(entity))) continue;
     seen.add(answer);
+    if (entity) seenEntities.add(entity);
     terms.push({ ...term, answer });
     if (terms.length >= cap) break;
   }
@@ -71,12 +75,15 @@ export function shouldExpandBand(currentCount: number, addedCount: number): bool
 
 export function mergeBandPacks(packs: readonly LlmPack[]): LlmPack {
   const seen = new Set<string>();
+  const seenEntities = new Set<string>();
   const terms: LlmTerm[] = [];
   for (const pack of packs) {
     for (const term of pack.terms) {
       const answer = term.answer.toUpperCase();
-      if (seen.has(answer)) continue;
+      const entity = letterKey(term.term);
+      if (seen.has(answer) || (entity && seenEntities.has(entity))) continue;
       seen.add(answer);
+      if (entity) seenEntities.add(entity);
       terms.push(term);
     }
   }

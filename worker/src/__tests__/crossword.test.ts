@@ -92,9 +92,15 @@ describe('term validation', () => {
   it('rejects truncations, glued phrases, and generic substitutes', () => {
     expect(derivePlayableAnswers('Brimstone', 'BRIMSTON')).toEqual([]);
     expect(derivePlayableAnswers('Basseterre', 'CAPITAL')).toEqual([]);
-    expect(derivePlayableAnswers('T cell', 'TCELL')).toEqual([]);
+    expect(derivePlayableAnswers('T cell', 'TCELL')).toEqual(['CELL']);
     expect(derivePlayableAnswers('T cell', 'CELL')).toEqual(['CELL']);
     expect(derivePlayableAnswers('Nevis', 'NEVIS')).toEqual(['NEVIS']);
+    expect(derivePlayableAnswers('Cayon Beach', 'CAYONBEA')).toEqual(['CAYON']);
+    expect(derivePlayableAnswers('Turtle Beach', 'TURTLEBCH')).toEqual([
+      'TURTLE',
+    ]);
+    expect(derivePlayableAnswers('chlorophyll', 'CHLOROPHY')).toEqual([]);
+    expect(derivePlayableAnswers('ribosome', 'RIBOSOM')).toEqual(['RIBOSOME']);
   });
 
   it('keeps complete long names for study mini-games', () => {
@@ -174,9 +180,9 @@ describe('term validation', () => {
         difficulty: 2,
       },
       {
-        term: 'too long',
-        answer: 'CHLOROPHYLL',
-        definition: 'Green pigment in plants.',
+        term: 'photosynthesis',
+        answer: 'PHOTOSYNTHESIS',
+        definition: 'How plants turn light into food.',
         category: 'bio',
         difficulty: 3,
       },
