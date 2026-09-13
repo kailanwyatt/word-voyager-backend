@@ -97,6 +97,26 @@ describe('term validation', () => {
     expect(derivePlayableAnswers('Nevis', 'NEVIS')).toEqual(['NEVIS']);
   });
 
+  it('keeps complete long names for study mini-games', () => {
+    const valid = validateLlmTerms([
+      {
+        term: 'Basseterre',
+        answer: 'BASS',
+        definition: 'The capital city of St. Kitts and Nevis.',
+        category: 'geography',
+        difficulty: 2,
+      },
+      {
+        term: 'Nevis',
+        answer: 'NEVIS',
+        definition: 'The smaller island in the federation.',
+        category: 'geography',
+        difficulty: 1,
+      },
+    ]);
+    expect(valid.map((row) => row.answer)).toEqual(['BASSETERRE', 'NEVIS']);
+  });
+
   it('drops definitions that leak the answer', () => {
     expect(definitionLeaksAnswer('A cell is the cell of life', 'CELL')).toBe(
       true,

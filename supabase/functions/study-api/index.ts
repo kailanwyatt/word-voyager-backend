@@ -14,7 +14,10 @@ import {
   previewSamplesRequestSchema,
   unlockRequestSchema,
 } from '../_shared/schemas.ts';
-import { generatePreviewSamples } from '../_shared/previewLlm.ts';
+import {
+  generatePreviewSamples,
+  parseCachedPreviewPayload,
+} from '../_shared/previewLlm.ts';
 
 const ACTIVE_JOB_STATUSES = [
   'queued',
@@ -212,7 +215,7 @@ async function handleCreateInput(
       kind: input.kind,
       normalized_topic_hash: hash,
       topic_text: input.topic,
-      notes_text: input.kind === 'pasted_notes' ? input.notes ?? null : null,
+      notes_text: input.notes ?? null,
       language: input.language ?? 'en',
       level: input.level ?? null,
       learning_goal: input.learningGoal ?? null,
@@ -233,6 +236,8 @@ type PreviewRow = {
   billed_at: string;
   created_at: string;
 };
+
+const PREVIEW_CACHE_VERSION = 'preview:v5';
 
 async function billedPreviewCount(
   admin: ReturnType<typeof serviceClient>,
@@ -258,7 +263,12 @@ async function handlePreviewSamples(
   const input = parsed.data;
   const admin = serviceClient();
   const hash = await sha256Hex(
-    [input.topic, input.focus ?? '', (input.notes ?? '').slice(0, 400)].join('\n'),
+    [
+      PREVIEW_CACHE_VERSION,
+      input.topic,
+      input.focus ?? '',
+      (input.notes ?? '').slice(0, 400),
+    ].join('\n'),
   );
   const cacheMs = PREVIEW_SAMPLES_CACHE_DAYS * 24 * 60 * 60 * 1000;
   const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -270,18 +280,22 @@ async function handlePreviewSamples(
     .eq('topic_hash', hash)
     .maybeSingle();
   const cachedRow = cached as PreviewRow | null;
+  const cachedPayload = cachedRow
+    ? parseCachedPreviewPayload(cachedRow.samples)
+    : { samples: [] as { term: string; definition: string }[] };
   const cacheFresh =
-    cachedRow &&
-    Date.now() - new Date(cachedRow.created_at).getTime() < cacheMs &&
-    Array.isArray(cachedRow.samples) &&
-    cachedRow.samples.length > 0;
+    cachedPayload.samples.length > 0 &&
+    cachedRow != null &&
+    Date.now() - new Date(cachedRow.created_at).getTime() < cacheMs;
 
   const used = await billedPreviewCount(admin, userId, dayAgo);
   const remaining = Math.max(0, PREVIEW_SAMPLES_DAILY_LIMIT - used);
 
   if (cacheFresh && cachedRow) {
     return jsonResponse({
-      samples: cachedRow.samples,
+      samples: cachedPayload.samples,
+      message: cachedPayload.message,
+      cover: cachedPayload.cover,
       cached: true,
       remainingToday: remaining,
     });
@@ -313,9 +327,9 @@ async function handlePreviewSamples(
     );
   }
 
-  let samples;
+  let preview;
   try {
-    samples = await generatePreviewSamples(input);
+    preview = await generatePreviewSamples(input);
   } catch (error) {
     const code = error instanceof Error ? error.message : 'job_failed';
     if (code === 'moderation_rejected') {
@@ -344,7 +358,11 @@ async function handlePreviewSamples(
     {
       owner_id: userId,
       topic_hash: hash,
-      samples,
+      samples: {
+        samples: preview.samples,
+        message: preview.message,
+        cover: preview.cover,
+      },
       billed_at: now,
       created_at: now,
     },
@@ -355,7 +373,9 @@ async function handlePreviewSamples(
   }
 
   return jsonResponse({
-    samples,
+    samples: preview.samples,
+    message: preview.message,
+    cover: preview.cover,
     cached: false,
     remainingToday: Math.max(0, remaining - 1),
   });
@@ -707,13 +727,42 @@ async function assemblePack(userId: string, packId: string) {
     puzzleByLesson.set(row.lesson_id, row.layout as Record<string, unknown>);
   }
 
-  let lessonRows = lessons ?? [];
-  if (!entitled) {
-    lessonRows = lessonRows.filter((l: { is_preview: boolean }) => l.is_preview);
+  const allLessonRows = lessons ?? [];
+  const difficultyByTermId = new Map<string, number>();
+  for (const term of terms ?? []) {
+    difficultyByTermId.set(term.id, Number(term.difficulty) || 2);
   }
+  const lessonDifficulty = (termIds: string[]): number => {
+    if (termIds.length === 0) return 2;
+    const mean =
+      termIds.reduce((sum, id) => sum + (difficultyByTermId.get(id) ?? 2), 0) /
+      termIds.length;
+    return Math.max(1, Math.min(5, Math.round(mean)));
+  };
+
+  const mappedLessons = allLessonRows.map((l: Record<string, unknown>) => {
+    const open = entitled || Boolean(l.is_preview);
+    const ids = termsByLesson.get(l.id as string) ?? [];
+    return {
+      id: l.id,
+      packId,
+      title: l.title,
+      category: l.category_id ?? undefined,
+      order: l.ordinal,
+      termIds: open ? ids : [],
+      supportedModes: l.supported_modes ?? ['discover', 'recall', 'review'],
+      puzzleContentId: `study_${packId}_${l.id}`,
+      isPreview: l.is_preview,
+      difficulty: lessonDifficulty(ids),
+      locked: !open,
+    };
+  });
+
   const allowedTermIds = new Set<string>();
-  for (const lesson of lessonRows) {
-    for (const id of termsByLesson.get(lesson.id) ?? []) allowedTermIds.add(id);
+  for (const lesson of mappedLessons) {
+    if (!lesson.locked) {
+      for (const id of lesson.termIds) allowedTermIds.add(id);
+    }
   }
 
   const mappedTerms = (terms ?? [])
@@ -731,21 +780,10 @@ async function assemblePack(userId: string, packId: string) {
       sourceIds: (sources ?? []).map((s: { id: string }) => s.id),
     }));
 
-  const mappedLessons = lessonRows.map((l: Record<string, unknown>) => ({
-    id: l.id,
-    packId,
-    title: l.title,
-    category: l.category_id ?? undefined,
-    order: l.ordinal,
-    termIds: termsByLesson.get(l.id as string) ?? [],
-    supportedModes: l.supported_modes ?? ['discover', 'recall', 'review'],
-    puzzleContentId: `study_${packId}_${l.id}`,
-    isPreview: l.is_preview,
-  }));
-
   const mappedPuzzles: Record<string, unknown> = {};
   for (const lesson of mappedLessons) {
-    const layout = puzzleByLesson.get(lesson.id);
+    if (lesson.locked) continue;
+    const layout = puzzleByLesson.get(lesson.id as string);
     if (layout) mappedPuzzles[lesson.puzzleContentId] = layout;
   }
 
@@ -758,6 +796,26 @@ async function assemblePack(userId: string, packId: string) {
     sourceType: s.type,
     validationStatus: s.validation_state,
   }));
+
+  const allTerms = terms ?? [];
+  const bandCounts = { easy: 0, medium: 0, hard: 0 };
+  for (const term of allTerms) {
+    const difficulty = Number(term.difficulty) || 2;
+    if (difficulty <= 2) bandCounts.easy += 1;
+    else if (difficulty <= 3) bandCounts.medium += 1;
+    else bandCounts.hard += 1;
+  }
+  const stats = {
+    wordCount: allTerms.length,
+    puzzleCount: allLessonRows.length,
+    miniGameWordCount: allTerms.filter((t: { normalized_answer?: string }) => {
+      const word = String(t.normalized_answer ?? '').replace(/[^A-Za-z]/g, '');
+      return word.length >= 3 && word.length <= 12;
+    }).length,
+    easyWordCount: bandCounts.easy,
+    mediumWordCount: bandCounts.medium,
+    hardWordCount: bandCounts.hard,
+  };
 
   return {
     pack: {
@@ -773,6 +831,7 @@ async function assemblePack(userId: string, packId: string) {
       generationStatus: entitled ? 'complete' : 'preview_ready',
       terms: mappedTerms,
       lessons: mappedLessons,
+      stats,
       sources: mappedSources,
       ownerId: userId,
       createdAt: packRow.created_at,

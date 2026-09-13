@@ -11,11 +11,13 @@ import type { PuzzleDefinition } from './types';
 
 export const MIN_ANSWER_LEN = 3;
 export const MAX_ANSWER_LEN = 8;
-export const MIN_PACK_TERMS = 10;
+/** Whole names kept for Storm Scramble / Word Dive even when they cannot cross. */
+export const MAX_MINIGAME_WORD_LEN = 12;
+export const MIN_PACK_TERMS = 36;
 export const TARGET_ANSWERS = 4;
 /** Prefer enough lessons for a real study session when terms allow it. */
-export const TARGET_LESSON_COUNT = 6;
-export const MAX_LESSON_COUNT = 8;
+export const TARGET_LESSON_COUNT = 24;
+export const MAX_LESSON_COUNT = 36;
 
 export type ValidTerm = {
   stableKey: string;
@@ -115,6 +117,32 @@ export function derivePlayableAnswers(term: string, answer: string): string[] {
   return out;
 }
 
+/**
+ * Keep complete 9–12 letter names (Basseterre, Brimstone) for study
+ * mini-games when they cannot sit in a crossword.
+ */
+export function miniGameOnlyAnswer(term: string, answer: string): string | null {
+  const parts = term
+    .split(/[\s/,.&+'’`-]+/)
+    .filter(Boolean)
+    .map(normalizeWord);
+  const full = normalizeWord(term);
+  const ans = normalizeWord(answer);
+  const allowed = new Set(
+    [full, ...parts].filter(
+      (word) =>
+        word.length >= MIN_ANSWER_LEN && word.length <= MAX_MINIGAME_WORD_LEN,
+    ),
+  );
+  const keep = (word: string): boolean =>
+    allowed.has(word) &&
+    word.length > MAX_ANSWER_LEN &&
+    word.length <= MAX_MINIGAME_WORD_LEN;
+  if (keep(ans)) return ans;
+  if (keep(full)) return full;
+  return parts.find(keep) ?? null;
+}
+
 export function definitionLeaksAnswer(
   definition: string,
   answer: string,
@@ -145,6 +173,47 @@ export function validateLlmTermsDetailed(terms: LlmTerm[]): TermValidationResult
     const display = term.term.trim();
     const candidates = derivePlayableAnswers(display, term.answer);
     if (candidates.length === 0) {
+      const miniGame = miniGameOnlyAnswer(display, term.answer);
+      if (miniGame) {
+        if (seen.has(miniGame)) {
+          rejected.push({ term: display, answer: miniGame, reason: 'duplicate' });
+          continue;
+        }
+        if (definitionLeaksAnswer(term.definition, miniGame)) {
+          rejected.push({
+            term: display,
+            answer: miniGame,
+            reason: 'leaks_answer',
+          });
+          continue;
+        }
+        if (isCircularDefinition(display || miniGame, term.definition)) {
+          rejected.push({ term: display, answer: miniGame, reason: 'circular' });
+          continue;
+        }
+        if (
+          containsFabricatedUrl(term.definition) ||
+          containsFabricatedUrl(term.explanation ?? '')
+        ) {
+          rejected.push({
+            term: display,
+            answer: miniGame,
+            reason: 'fabricated_url',
+          });
+          continue;
+        }
+        seen.add(miniGame);
+        accepted.push({
+          stableKey: miniGame.toLowerCase(),
+          term: display || miniGame,
+          answer: miniGame,
+          definition: term.definition.trim(),
+          explanation: term.explanation?.trim(),
+          category: term.category.trim() || 'General',
+          difficulty: term.difficulty as ValidTerm['difficulty'],
+        });
+        continue;
+      }
       const normalized = normalizeWord(term.answer || display);
       let reason: TermRejection['reason'] = 'empty';
       if (normalized.length > 0 && normalized.length < MIN_ANSWER_LEN) {
@@ -322,23 +391,55 @@ export function buildConnectedPuzzle(
   return puzzle;
 }
 
+function difficultyBand(level: number): 'Easy' | 'Medium' | 'Hard' {
+  if (level <= 2) return 'Easy';
+  if (level <= 3) return 'Medium';
+  return 'Hard';
+}
+
+function averageDifficulty(terms: readonly ValidTerm[]): number {
+  if (terms.length === 0) return 2;
+  return Math.max(
+    1,
+    Math.min(
+      5,
+      Math.round(
+        terms.reduce((sum, term) => sum + term.difficulty, 0) / terms.length,
+      ),
+    ),
+  );
+}
+
+function shuffleWithinDifficulty(terms: ValidTerm[], random: () => number): void {
+  let start = 0;
+  while (start < terms.length) {
+    const band = terms[start]!.difficulty;
+    let end = start + 1;
+    while (end < terms.length && terms[end]!.difficulty === band) end += 1;
+    for (let i = end - 1; i > start; i -= 1) {
+      const j = start + Math.floor(random() * (i - start + 1));
+      const tmp = terms[i]!;
+      terms[i] = terms[j]!;
+      terms[j] = tmp;
+    }
+    start = end;
+  }
+}
+
 export function groupTermsIntoLessons(
   packId: string,
   terms: ValidTerm[],
   seed: number,
 ): BuiltLesson[] {
-  const remaining = [...terms];
+  const remaining = [...terms].filter((term) => isPlayableAnswer(term.answer));
+  remaining.sort(
+    (a, b) => a.difficulty - b.difficulty || a.answer.localeCompare(b.answer),
+  );
   const random = seededRandom(seed + 17);
-  for (let i = remaining.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(random() * (i + 1));
-    const tmp = remaining[i]!;
-    remaining[i] = remaining[j]!;
-    remaining[j] = tmp;
-  }
+  shuffleWithinDifficulty(remaining, random);
 
   const lessons: BuiltLesson[] = [];
   let stall = 0;
-  // Prefer smaller connected grids so we can emit several lessons from one term set.
   while (
     lessons.length < MAX_LESSON_COUNT &&
     remaining.length >= 1 &&
@@ -346,8 +447,7 @@ export function groupTermsIntoLessons(
   ) {
     const lessonId = `lesson_${lessons.length + 1}`;
     const puzzleContentId = `study_${packId}_${lessonId}`;
-    const window = remaining.slice(0, 40).map((term) => term.answer);
-    // Prefer pairs+; only fall back to single-word when stuck so packs are not empty.
+    const window = remaining.slice(0, 14).map((term) => term.answer);
     const allowSingleWord = remaining.length === 1 || stall >= remaining.length;
 
     const puzzle = buildConnectedPuzzle(
@@ -376,7 +476,6 @@ export function groupTermsIntoLessons(
       stall += 1;
       continue;
     }
-    // Prefer multi-word lessons; only accept singles as a last resort.
     if (usedTerms.length < 2 && !allowSingleWord) {
       rotateLeft(remaining);
       stall += 1;
@@ -389,9 +488,10 @@ export function groupTermsIntoLessons(
     }
 
     const order = lessons.length;
+    const difficulty = averageDifficulty(usedTerms);
     lessons.push({
       id: lessonId,
-      title: `Puzzle ${order + 1}`,
+      title: `Puzzle ${order + 1} · ${difficultyBand(difficulty)}`,
       category: usedTerms[0]?.category,
       order,
       termIds: usedTerms.map((term) => term.stableKey),
@@ -400,6 +500,7 @@ export function groupTermsIntoLessons(
       puzzleContentId,
       puzzle: {
         ...puzzle,
+        difficulty,
         studyLessonId: lessonId,
         studyPackId: packId,
       },

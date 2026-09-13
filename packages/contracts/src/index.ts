@@ -104,6 +104,8 @@ export const previewSamplesResponseSchema = z
     samples: z.array(previewSampleSchema).max(3),
     cached: z.boolean(),
     remainingToday: z.number().int().nonnegative(),
+    message: z.string().min(24).max(320).optional(),
+    cover: z.string().min(8).max(120).optional(),
   })
   .strict();
 
@@ -116,7 +118,7 @@ export type PreviewSamplesResponse = z.infer<
 export const llmTermSchema = z
   .object({
     term: z.string().min(1).max(40),
-    answer: z.string().regex(/^[A-Za-z]{3,8}$/),
+    answer: z.string().regex(/^[A-Za-z]{3,12}$/),
     definition: z.string().min(8).max(240),
     explanation: z.string().max(400).optional(),
     category: z.string().min(1).max(40),
@@ -124,15 +126,49 @@ export const llmTermSchema = z
   })
   .strict();
 
-export const llmPackSchema = z
+/** One Easy, Medium, or Hard word set before the worker merges them. */
+export const STUDY_BAND_WAVE_MIN = 8;
+export const STUDY_BAND_WAVE_MAX = 24;
+export const STUDY_BAND_TERM_MIN = 16;
+export const STUDY_BAND_TERM_MAX = 60;
+export const STUDY_TERMS_PER_BAND_TARGET = 60;
+export const STUDY_BAND_EXPAND_MIN = 8;
+/** Paid pack after all three bands are merged. */
+export const STUDY_PACK_TERM_MIN = 36;
+export const STUDY_PACK_TERM_MAX = 180;
+export const STUDY_TERMS_PER_BAND_FLOOR = 12;
+
+const llmPackFields = {
+  title: z.string().min(1).max(80),
+  description: z.string().min(1).max(400),
+  language: z.enum(['en']).default('en'),
+};
+
+export const llmBandWaveSchema = z
   .object({
-    title: z.string().min(1).max(80),
-    description: z.string().min(1).max(400),
-    language: z.enum(['en']).default('en'),
-    terms: z.array(llmTermSchema).min(10).max(40),
+    ...llmPackFields,
+    terms: z
+      .array(llmTermSchema)
+      .min(STUDY_BAND_WAVE_MIN)
+      .max(STUDY_BAND_WAVE_MAX),
   })
   .strict();
 
+export const llmBandPackSchema = z
+  .object({
+    ...llmPackFields,
+    terms: z.array(llmTermSchema).min(STUDY_BAND_TERM_MIN).max(STUDY_BAND_TERM_MAX),
+  })
+  .strict();
+
+export const llmPackSchema = z
+  .object({
+    ...llmPackFields,
+    terms: z.array(llmTermSchema).min(STUDY_PACK_TERM_MIN).max(STUDY_PACK_TERM_MAX),
+  })
+  .strict();
+
+export type LlmBandPack = z.infer<typeof llmBandPackSchema>;
 export type LlmPack = z.infer<typeof llmPackSchema>;
 export type LlmTerm = z.infer<typeof llmTermSchema>;
 
@@ -207,6 +243,8 @@ export const studyLessonSchema = z
     supportedModes: z.array(z.enum(['discover', 'recall', 'review'])),
     puzzleContentId: z.string(),
     isPreview: z.boolean(),
+    difficulty: z.number().int().min(1).max(5).optional(),
+    locked: z.boolean().optional(),
   })
   .strict();
 
@@ -224,6 +262,16 @@ export const studyPackContentSchema = z
     generationStatus: generationStatusSchema,
     terms: z.array(studyTermSchema),
     lessons: z.array(studyLessonSchema),
+    stats: z
+      .object({
+        wordCount: z.number().int().nonnegative(),
+        puzzleCount: z.number().int().nonnegative(),
+        miniGameWordCount: z.number().int().nonnegative(),
+        easyWordCount: z.number().int().nonnegative().optional(),
+        mediumWordCount: z.number().int().nonnegative().optional(),
+        hardWordCount: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
     sources: z.array(studySourceSchema),
     ownerId: z.string(),
     shareCode: z.string().optional(),

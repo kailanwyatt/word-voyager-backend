@@ -335,7 +335,7 @@ async function persistPack(
       type: sourceType,
       title:
         args.input.kind === 'pasted_notes'
-          ? 'Pasted study notes'
+          ? 'Word list'
           : 'Model-proposed topic terms',
       validation_state: 'unverified',
     })
