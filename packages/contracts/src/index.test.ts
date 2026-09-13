@@ -4,6 +4,8 @@ import {
   errorEnvelopeSchema,
   llmPackSchema,
   createInputRequestSchema,
+  previewSamplesRequestSchema,
+  previewSamplesResponseSchema,
 } from './index';
 
 describe('contracts', () => {
@@ -49,6 +51,23 @@ describe('contracts', () => {
     ).toBe(false);
   });
 
+  it('accepts a cheap preview-samples request and caps the payload', () => {
+    expect(
+      previewSamplesRequestSchema.safeParse({
+        topic: 'World history for students preparing for an exam',
+        extra: true,
+      }).success,
+    ).toBe(false);
+    const parsed = previewSamplesResponseSchema.parse({
+      samples: [
+        { term: 'TREATY', definition: 'A formal agreement between nations.' },
+      ],
+      cached: true,
+      remainingToday: 5,
+    });
+    expect(parsed.samples).toHaveLength(1);
+  });
+
   it('rejects invented tool/url blobs on LLM pack root', () => {
     expect(
       llmPackSchema.safeParse({
@@ -57,6 +76,25 @@ describe('contracts', () => {
         language: 'en',
         terms: [],
         tools: [{ name: 'fetch', url: 'http://169.254.169.254' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires enough terms for a useful paid study pack', () => {
+    const answers = ['ALPHA', 'BRAVO', 'CHARLIE', 'DELTA', 'ECHO', 'FOXTROT', 'GOLF', 'HOTEL', 'INDIA'];
+    const terms = answers.map((answer, index) => ({
+      term: `Term ${index}`,
+      answer,
+      definition: 'A sufficiently detailed educational definition.',
+      category: 'Subject concepts',
+      difficulty: 2,
+    }));
+    expect(
+      llmPackSchema.safeParse({
+        title: 'Subject',
+        description: 'A useful study pack.',
+        language: 'en',
+        terms,
       }).success,
     ).toBe(false);
   });

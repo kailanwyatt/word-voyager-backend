@@ -11,6 +11,7 @@ import type { PuzzleDefinition } from './types';
 
 export const MIN_ANSWER_LEN = 3;
 export const MAX_ANSWER_LEN = 8;
+export const MIN_PACK_TERMS = 10;
 export const TARGET_ANSWERS = 4;
 /** Prefer enough lessons for a real study session when terms allow it. */
 export const TARGET_LESSON_COUNT = 6;
@@ -79,9 +80,9 @@ export function isPlayableAnswer(answer: string): boolean {
 }
 
 /**
- * Prefer crossword-friendly tokens from multi-word place names.
- * e.g. "St. Kitts" + STKITTS → STKITTS, KITTS.
- * Never silently truncate long names (Basseterre → BASSETER).
+ * Accept only a complete display term or a complete word within it.
+ * Never silently glue or truncate names (St. Kitts → STKITTS,
+ * Basseterre → BASSETER).
  */
 export function derivePlayableAnswers(term: string, answer: string): string[] {
   const out: string[] = [];
@@ -96,32 +97,19 @@ export function derivePlayableAnswers(term: string, answer: string): string[] {
   };
 
   const parts = term.split(/[\s/,.&+'’`-]+/).filter(Boolean);
-  const fullTerm = normalizeWord(term);
   const normalizedAnswer = normalizeWord(answer);
 
-  // Reject answers that are clearly truncations of a longer single-token label.
-  const isTruncation =
-    parts.length <= 1 &&
-    fullTerm.length > MAX_ANSWER_LEN &&
-    normalizedAnswer.length === MAX_ANSWER_LEN &&
-    fullTerm.startsWith(normalizedAnswer);
-
-  if (!isTruncation) {
-    push(answer);
-  }
-
-  const skip = new Set(['ST', 'SAINT', 'THE', 'OF', 'AND', 'LA', 'LE', 'EL', 'DE']);
-  const glued = normalizeWord(parts.join(''));
-  // Only split multi-word labels when the answer is that glued compound.
+  // The playable answer must be a real lexical form of the display term, never
+  // a synonym, generic substitute, glued phrase, or invented truncation.
+  const meaningfulParts = parts
+    .map(normalizeWord)
+    .filter((part) => part.length >= MIN_ANSWER_LEN);
+  const fullTerm = normalizeWord(term);
   if (
-    parts.length > 1 &&
-    isPlayableAnswer(normalizedAnswer) &&
-    (glued === normalizedAnswer || fullTerm === normalizedAnswer)
+    (parts.length === 1 && normalizedAnswer === fullTerm) ||
+    meaningfulParts.includes(normalizedAnswer)
   ) {
-    for (const part of parts) {
-      if (skip.has(normalizeWord(part))) continue;
-      push(part);
-    }
+    push(answer);
   }
 
   return out;

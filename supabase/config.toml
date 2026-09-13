@@ -62,6 +62,9 @@ inspector_port = 8083
 [functions.study-api]
 verify_jwt = true
 
+[functions.revenuecat-webhook]
+verify_jwt = false
+
 [analytics]
 enabled = false
 

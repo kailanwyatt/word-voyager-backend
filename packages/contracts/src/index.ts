@@ -79,6 +79,40 @@ export const unlockRequestSchema = z
   })
   .strict();
 
+/** Cheap Create Pack samples — not a full generation job. */
+export const PREVIEW_SAMPLES_DAILY_LIMIT = 6;
+export const PREVIEW_SAMPLES_CACHE_DAYS = 7;
+export const PREVIEW_SAMPLES_COOLDOWN_MS = 8_000;
+
+export const previewSamplesRequestSchema = z
+  .object({
+    topic: z.string().min(3).max(500),
+    notes: z.string().max(10_000).optional(),
+    focus: z.string().max(300).optional(),
+  })
+  .strict();
+
+export const previewSampleSchema = z
+  .object({
+    term: z.string().min(1).max(40),
+    definition: z.string().min(8).max(160),
+  })
+  .strict();
+
+export const previewSamplesResponseSchema = z
+  .object({
+    samples: z.array(previewSampleSchema).max(3),
+    cached: z.boolean(),
+    remainingToday: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export type PreviewSamplesRequest = z.infer<typeof previewSamplesRequestSchema>;
+export type PreviewSample = z.infer<typeof previewSampleSchema>;
+export type PreviewSamplesResponse = z.infer<
+  typeof previewSamplesResponseSchema
+>;
+
 export const llmTermSchema = z
   .object({
     term: z.string().min(1).max(40),
@@ -95,7 +129,7 @@ export const llmPackSchema = z
     title: z.string().min(1).max(80),
     description: z.string().min(1).max(400),
     language: z.enum(['en']).default('en'),
-    terms: z.array(llmTermSchema).min(4).max(40),
+    terms: z.array(llmTermSchema).min(10).max(40),
   })
   .strict();
 

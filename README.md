@@ -109,12 +109,30 @@ All routes are under `/functions/v1/study-api` and require a user JWT.
 
 Preview generation is free. Unlock costs 1 credit in a single Postgres transaction (`unlock_pack_with_credit`). Terminal generation failure does not debit.
 
+## RevenueCat consumable fulfillment
+
+The `revenuecat-webhook` Edge Function fulfills `wordvoyager.study_pack_1` only for RevenueCat app `appd45aad0dae` and `NON_RENEWING_PURCHASE` events. It records event and store transaction metadata, resolves an existing Supabase profile UUID across `app_user_id`, `original_app_user_id`, and `aliases`, then atomically adds one ledger credit. The RevenueCat event ID is the idempotency boundary, so retries cannot add another credit. Purchases do not create permanent entitlements.
+
+Configure RevenueCat with the hosted endpoint `https://<project-ref>.supabase.co/functions/v1/revenuecat-webhook`. Set a long random Authorization header in RevenueCat and store the exact full value as the server-only Supabase secret `REVENUECAT_WEBHOOK_AUTHORIZATION`. Enable HMAC signing and store the generated signing secret as `REVENUECAT_WEBHOOK_SIGNING_SECRET`. Never put either value in the app or source control. Scope the integration to app `appd45aad0dae` and the non-renewing purchase event; the server independently enforces both filters.
+
+Deploy after migrations and secrets are configured:
+
+```bash
+supabase db push
+supabase functions deploy revenuecat-webhook --no-verify-jwt
+```
+
+The webhook bypasses user JWT verification because it is server-to-server, but every request must pass the RevenueCat Authorization check. HMAC verification uses RevenueCat's signature over the unchanged raw request body. Promo and admin credits are available only through the service-role-only `grant_study_credits_server` RPC. The legacy development RPC is service-role-only, and `/credits/dev-grant` additionally requires both `ALLOW_DEV_GRANTS=true` and a local Supabase URL.
+
 ## Tests
 
 ```bash
 npm test
 # with local DB up:
 psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f scripts/test-rls.sql
+psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f scripts/test-revenuecat.sql
+# if Deno is installed:
+deno test supabase/functions/_shared/revenuecat_test.ts
 ```
 
 ## Remote cutover (later)
@@ -122,6 +140,6 @@ psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f scripts/test-rls
 1. Create a hosted Supabase project
 2. `supabase link --project-ref <ref>`
 3. `supabase db push`
-4. Deploy `study-api`; run this worker on Fly/Railway/a VM (not Edge)
+4. Deploy `study-api` and `revenuecat-webhook`; run this worker on Fly/Railway/a VM (not Edge)
 5. Change Expo `EXPO_PUBLIC_*` URLs/keys
 6. Keep the service role and `OPENAI_API_KEY` off the device

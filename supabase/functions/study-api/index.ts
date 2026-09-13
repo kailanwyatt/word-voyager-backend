@@ -8,8 +8,13 @@ import {
 import {
   createInputRequestSchema,
   createJobRequestSchema,
+  PREVIEW_SAMPLES_CACHE_DAYS,
+  PREVIEW_SAMPLES_COOLDOWN_MS,
+  PREVIEW_SAMPLES_DAILY_LIMIT,
+  previewSamplesRequestSchema,
   unlockRequestSchema,
 } from '../_shared/schemas.ts';
+import { generatePreviewSamples } from '../_shared/previewLlm.ts';
 
 const ACTIVE_JOB_STATUSES = [
   'queued',
@@ -18,6 +23,18 @@ const ACTIVE_JOB_STATUSES = [
   'validating',
   'building_preview',
 ];
+
+function developmentCreditGrantsEnabled(): boolean {
+  if (Deno.env.get('ALLOW_DEV_GRANTS') !== 'true') return false;
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  if (!supabaseUrl) return false;
+  try {
+    const hostname = new URL(supabaseUrl).hostname;
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -69,6 +86,9 @@ async function routeRequest(
   }
   if (req.method === 'POST' && path === '/generation-jobs') {
     return await handleCreateJob(userId, await req.json());
+  }
+  if (req.method === 'POST' && path === '/preview-samples') {
+    return await handlePreviewSamples(userId, await req.json());
   }
 
   const jobMatch = path.match(/^\/jobs\/([^/]+)$/);
@@ -142,7 +162,7 @@ async function handleBootstrap(userId: string): Promise<Response> {
     .eq('account_id', userId)
     .is('revoked_at', null);
 
-  const allowDevGrants = Deno.env.get('ALLOW_DEV_GRANTS') === 'true';
+  const allowDevGrants = developmentCreditGrantsEnabled();
   return jsonResponse({
     serverTime: new Date().toISOString(),
     creditBalance,
@@ -206,6 +226,139 @@ async function handleCreateInput(
     return errorResponse(500, 'job_failed', 'Could not store input');
   }
   return jsonResponse({ id: data.id, kind: data.kind, createdAt: data.created_at }, 201);
+}
+
+type PreviewRow = {
+  samples: unknown;
+  billed_at: string;
+  created_at: string;
+};
+
+async function billedPreviewCount(
+  admin: ReturnType<typeof serviceClient>,
+  userId: string,
+  sinceIso: string,
+): Promise<number> {
+  const { count } = await admin
+    .from('study_preview_samples')
+    .select('id', { count: 'exact', head: true })
+    .eq('owner_id', userId)
+    .gte('billed_at', sinceIso);
+  return count ?? 0;
+}
+
+async function handlePreviewSamples(
+  userId: string,
+  body: unknown,
+): Promise<Response> {
+  const parsed = previewSamplesRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return errorResponse(422, 'validation_failed', 'Invalid preview request');
+  }
+  const input = parsed.data;
+  const admin = serviceClient();
+  const hash = await sha256Hex(
+    [input.topic, input.focus ?? '', (input.notes ?? '').slice(0, 400)].join('\n'),
+  );
+  const cacheMs = PREVIEW_SAMPLES_CACHE_DAYS * 24 * 60 * 60 * 1000;
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: cached } = await admin
+    .from('study_preview_samples')
+    .select('samples, billed_at, created_at')
+    .eq('owner_id', userId)
+    .eq('topic_hash', hash)
+    .maybeSingle();
+  const cachedRow = cached as PreviewRow | null;
+  const cacheFresh =
+    cachedRow &&
+    Date.now() - new Date(cachedRow.created_at).getTime() < cacheMs &&
+    Array.isArray(cachedRow.samples) &&
+    cachedRow.samples.length > 0;
+
+  const used = await billedPreviewCount(admin, userId, dayAgo);
+  const remaining = Math.max(0, PREVIEW_SAMPLES_DAILY_LIMIT - used);
+
+  if (cacheFresh && cachedRow) {
+    return jsonResponse({
+      samples: cachedRow.samples,
+      cached: true,
+      remainingToday: remaining,
+    });
+  }
+
+  const { data: latest } = await admin
+    .from('study_preview_samples')
+    .select('billed_at')
+    .eq('owner_id', userId)
+    .order('billed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latest?.billed_at) {
+    const elapsed = Date.now() - new Date(latest.billed_at).getTime();
+    if (elapsed < PREVIEW_SAMPLES_COOLDOWN_MS) {
+      return errorResponse(
+        429,
+        'rate_limited',
+        'Please wait a moment before requesting another preview',
+      );
+    }
+  }
+
+  if (used >= PREVIEW_SAMPLES_DAILY_LIMIT) {
+    return errorResponse(
+      429,
+      'quota_exceeded',
+      'Daily sample preview limit reached',
+    );
+  }
+
+  let samples;
+  try {
+    samples = await generatePreviewSamples(input);
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'job_failed';
+    if (code === 'moderation_rejected') {
+      return errorResponse(
+        422,
+        'moderation_rejected',
+        'This topic wasn’t approved. Try a different classroom topic.',
+      );
+    }
+    if (code === 'provider_unavailable') {
+      return errorResponse(
+        503,
+        'provider_unavailable',
+        'Study is busy right now. Please try again in a moment.',
+      );
+    }
+    return errorResponse(
+      422,
+      'validation_failed',
+      'We couldn’t preview that topic. Add a bit more detail and try again.',
+    );
+  }
+
+  const now = new Date().toISOString();
+  const { error } = await admin.from('study_preview_samples').upsert(
+    {
+      owner_id: userId,
+      topic_hash: hash,
+      samples,
+      billed_at: now,
+      created_at: now,
+    },
+    { onConflict: 'owner_id,topic_hash' },
+  );
+  if (error) {
+    return errorResponse(500, 'job_failed', 'Could not save preview');
+  }
+
+  return jsonResponse({
+    samples,
+    cached: false,
+    remainingToday: Math.max(0, remaining - 1),
+  });
 }
 
 async function handleCreateJob(
@@ -426,7 +579,7 @@ async function handleUnlock(
 }
 
 async function handleDevGrant(userId: string): Promise<Response> {
-  if (Deno.env.get('ALLOW_DEV_GRANTS') !== 'true') {
+  if (!developmentCreditGrantsEnabled()) {
     return errorResponse(403, 'not_entitled', 'Dev grants are disabled');
   }
   const admin = serviceClient();

@@ -11,6 +11,7 @@ import { createProvider, type LlmProvider } from './ai/provider';
 import { supabaseServiceRoleKey, supabaseUrl } from './loadEnv';
 import {
   groupTermsIntoLessons,
+  MIN_PACK_TERMS,
   validateLlmTermsDetailed,
 } from './puzzle/buildPack';
 
@@ -158,7 +159,7 @@ async function runJob(
         })),
       });
     }
-    if (terms.length < 4) {
+    if (terms.length < MIN_PACK_TERMS) {
       // eslint-disable-next-line no-console
       console.error('[study-worker] too few playable terms', {
         jobId: job.id,

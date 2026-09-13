@@ -8,6 +8,7 @@ import {
 } from '../puzzle/crossword';
 import {
   buildConnectedPuzzle,
+  derivePlayableAnswers,
   definitionLeaksAnswer,
   groupTermsIntoLessons,
   validateLlmTerms,
@@ -88,6 +89,14 @@ describe('crossword golden layouts', () => {
 });
 
 describe('term validation', () => {
+  it('rejects truncations, glued phrases, and generic substitutes', () => {
+    expect(derivePlayableAnswers('Brimstone', 'BRIMSTON')).toEqual([]);
+    expect(derivePlayableAnswers('Basseterre', 'CAPITAL')).toEqual([]);
+    expect(derivePlayableAnswers('T cell', 'TCELL')).toEqual([]);
+    expect(derivePlayableAnswers('T cell', 'CELL')).toEqual(['CELL']);
+    expect(derivePlayableAnswers('Nevis', 'NEVIS')).toEqual(['NEVIS']);
+  });
+
   it('drops definitions that leak the answer', () => {
     expect(definitionLeaksAnswer('A cell is the cell of life', 'CELL')).toBe(
       true,
