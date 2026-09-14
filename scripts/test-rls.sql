@@ -16,9 +16,12 @@ begin
     (user_a, 'authenticated', 'authenticated', 'a@example.com', crypt('pw', gen_salt('bf')), now(), '{"provider":"email"}', '{}', now(), now(), '00000000-0000-0000-0000-000000000000'),
     (user_b, 'authenticated', 'authenticated', 'b@example.com', crypt('pw', gen_salt('bf')), now(), '{"provider":"email"}', '{}', now(), now(), '00000000-0000-0000-0000-000000000000');
 
-  if public.credit_balance(user_a) <> 2 then
-    raise exception 'signup grant missing for A';
+  if public.credit_balance(user_a) <> 0 then
+    raise exception 'signup must not grant credits, balance=%', public.credit_balance(user_a);
   end if;
+
+  insert into public.study_credit_ledger (account_id, delta, reason, idempotency_key)
+  values (user_a, 1, 'purchase', 'purchase-1');
 
   insert into public.study_packs (owner_id, kind, visibility, lifecycle_state)
   values (user_a, 'custom', 'private', 'preview')
@@ -47,7 +50,7 @@ begin
   on conflict (account_id, idempotency_key) do nothing;
 
   balance := public.credit_balance(user_a);
-  if balance <> 1 then
+  if balance <> 0 then
     raise exception 'idempotent spend failed, balance=%', balance;
   end if;
 

@@ -87,7 +87,7 @@ EXPO_PUBLIC_STUDY_API_URL=http://127.0.0.1:54321/functions/v1/study-api
 
 iOS Simulator can use `127.0.0.1`. Android emulator: replace the host with `10.0.2.2`. A physical device needs your machine's LAN IP.
 
-Anonymous sign-in happens automatically the first time Study talks to the backend. New accounts receive 2 Study Credits via `handle_new_user`.
+Anonymous sign-in happens automatically the first time Study talks to the backend. New accounts start with 0 Study Credits. Credits come from the Study credit IAP (or a service-role promo/admin grant).
 
 ## API
 

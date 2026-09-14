@@ -21,7 +21,7 @@ begin
     'transaction-1', 'transaction-1', 'APP_STORE', 'SANDBOX',
     1700000000000, 1700000001000, 'USD', 1.99, '{"event":{"id":"rc-event-1"}}'
   );
-  if result->>'status' <> 'granted' or public.credit_balance(user_a) <> 3 then
+  if result->>'status' <> 'granted' or public.credit_balance(user_a) <> 1 then
     raise exception 'first verified purchase was not granted exactly once: %', result;
   end if;
 
@@ -31,7 +31,7 @@ begin
     'transaction-1', 'transaction-1', 'APP_STORE', 'SANDBOX',
     1700000000000, 1700000001000, 'USD', 1.99, '{"replayed":true}'
   );
-  if result->>'duplicate' <> 'true' or public.credit_balance(user_a) <> 3 then
+  if result->>'duplicate' <> 'true' or public.credit_balance(user_a) <> 1 then
     raise exception 'replay duplicated credit: %', result;
   end if;
 
@@ -40,7 +40,7 @@ begin
     'another.product', user_a::text, user_a::text, '{}', null, null,
     'APP_STORE', 'SANDBOX', null, 1700000002000, 'USD', 1.99, '{}'
   );
-  if result->>'status' <> 'ignored' or public.credit_balance(user_a) <> 3 then
+  if result->>'status' <> 'ignored' or public.credit_balance(user_a) <> 1 then
     raise exception 'wrong product granted credit: %', result;
   end if;
 
@@ -49,8 +49,8 @@ begin
     'wordvoyager.study_pack_1', user_a::text, user_b::text, '{}', null, null,
     'APP_STORE', 'SANDBOX', null, 1700000003000, 'USD', 1.99, '{}'
   );
-  if result->>'status' <> 'identity_ambiguous' or public.credit_balance(user_a) <> 3
-    or public.credit_balance(user_b) <> 2 then
+  if result->>'status' <> 'identity_ambiguous' or public.credit_balance(user_a) <> 1
+    or public.credit_balance(user_b) <> 0 then
     raise exception 'ambiguous identity granted credit: %', result;
   end if;
 
